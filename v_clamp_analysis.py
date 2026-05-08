@@ -16,7 +16,7 @@ import os
 
 
 # Load data
-root = '/Volumes/BWH-HVDATA/Individual Folders/Garrett Scarpa/PatchClamp/Analyses/RD_SCLC_TumorCells'
+root = '/Volumes/BWH-HVDATA/Individual Folders/Garrett Scarpa/PatchClamp/Analyses/RD_SCLC_TumorCells_CoCulture'
 
 
 # Detection metrics
@@ -165,69 +165,53 @@ def process_recording(rec_dir, rec_file):
 
     window_ms = 15
     window_samples = int(window_ms / 1000 * fs)
-
+    
     for ct in filtered_crossings:
-
+    
         idx = np.argmin(np.abs(time_f - ct))
-
+    
         start = max(0, idx - int(2e-3 * fs))
         end = start + window_samples
-
+    
         if end >= len(filtered):
             continue
-
+    
         segment = filtered[start:end]
-
+    
         baseline = np.median(segment[:5])
         peak = np.min(segment)
-
+    
         amp = baseline - peak
-
-        # amplitude filter
-
+    
         if not (min_amp < amp < max_amp):
             continue
-
-        # -----------------------------------
-        # RESTORE PREVIOUS STATE IF POSSIBLE
-        # -----------------------------------
-
+    
         status = True
         base = None
-        peak_t = None   # saved peak time (set after base drag or on restore)
-
+        peak_t = None
+    
+        # ---- RESTORE PREVIOUS STATE (FIXED SCOPE) ----
         if saved_events is not None:
-
             for old_event in saved_events:
-
                 if abs(old_event["ct"] - ct) < 1e-6:
-
                     status   = old_event.get("status", True)
-                    base     = old_event.get("base",   None)
+                    base     = old_event.get("base", None)
                     peak_t   = old_event.get("peak_t", None)
-
+                    event_auc = old_event.get("auc", None)
                     break
-
-        # -----------------------------------
-        # STORE EVENT
-        # -----------------------------------
-
+    
         events.append({
-
             "recording_path": rec_dir,
             "file": rec_file,
-
             "ct": ct,
-
             "status": status,
-            "base":   base,
-            "peak_t": peak_t,   # None → will be computed from search on first display
-
-            "amp":       amp,
-            "threshold": threshold
+            "base": base,
+            "peak_t": peak_t,
+            "amp": amp,
+            "threshold": threshold,
+            "auc": None
         })
 
-    print(f"{rec_file}: {len(filtered_crossings)} crossings")
 
 
 for rec_dir, rec_file in recordings:
@@ -271,6 +255,26 @@ def load_trace(event):
 # ----------------------------
 # PEAK HELPERS
 # ----------------------------
+def compute_auc(event):
+    """Compute baseline-subtracted AUC (pA·s) between the two base markers.
+    The baseline is the linear interpolation between the signal values at
+    left_x and right_x, so only the area of the inward deflection is counted.
+    Updates event['auc'] in place and returns the value."""
+    time, filtered, fs = load_trace(event)
+    left_x, right_x = event["base"]
+    mask = (time >= left_x) & (time <= right_x)
+    if not np.any(mask):
+        event["auc"] = None
+        return None
+    seg_t = time[mask]
+    seg_y = filtered[mask]
+    # linear baseline between the two anchor points
+    y_left  = np.interp(left_x,  time, filtered)
+    y_right = np.interp(right_x, time, filtered)
+    baseline = np.interp(seg_t, [left_x, right_x], [y_left, y_right])
+    auc = float(np.abs(np.trapz(seg_y - baseline, seg_t)))
+    event["auc"] = auc
+    return auc
 
 def compute_peak_between_bases(event):
     """Return (peak_time, peak_value) as the most negative sample between the
@@ -366,6 +370,7 @@ for i, event in enumerate(events):
         right = min(time[-1], ct + 0.001)
 
         event["base"] = [left, right]
+        event['auc'] = None
 
 
 def get_recording_key(event):
@@ -473,6 +478,7 @@ def update_plot():
     # ----------------------------
 
     t_peak, y_peak = get_peak(event)
+    compute_auc(event)
 
     # build view window centred on the peak
     peak_idx = np.argmin(np.abs(time - t_peak))
@@ -648,7 +654,7 @@ def on_motion(mouse_event):
 
     # recompute peak between the updated bases and store it on the event
     compute_peak_between_bases(current)
-
+    compute_auc(current)
     update_plot()
 
 

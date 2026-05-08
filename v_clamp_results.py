@@ -18,7 +18,7 @@ from itertools import combinations
 # ROOT DIRECTORY
 # =============================================================================
 
-root = '/Volumes/BWH-HVDATA/Individual Folders/Garrett Scarpa/PatchClamp/Analyses/RD_SCLC_TumorCells'
+root = '/Volumes/BWH-HVDATA/Individual Folders/Garrett Scarpa/PatchClamp/Analyses/RD_SCLC_TumorCells_CoCulture'
 
 
 # =============================================================================
@@ -30,7 +30,8 @@ event_features = defaultdict(lambda: {
     "width": [],
     "ttp": [],
     "rec": [],
-    "base_dur": []   # right_t − left_t in ms; should equal ttp + rec
+    "base_dur": [],
+    "auc": []
 })
 
 # =============================================================================
@@ -110,19 +111,15 @@ def extract_features(wf, t, left_base_val=None, right_base_val=None, right_t_ms=
 
     # ------------------------------------------------------------------
     # 0. CONSTRAIN PEAK SEARCH to the event interval [left_base, right_base]
-    #    t=0 is the left base; right_t_ms is the right base in ms.
-    #    Only search for the peak within this interval.
     # ------------------------------------------------------------------
     if right_t_ms is not None and right_t_ms > 0:
         event_mask = (t >= 0) & (t <= right_t_ms)
     else:
-        event_mask = (t >= 0)   # fallback: at least don't search pre-window
+        event_mask = (t >= 0)
 
     if not np.any(event_mask):
-        # Edge case: no samples in range — fall back to full waveform
         event_mask = np.ones(len(t), dtype=bool)
 
-    # argmin within the masked region, then map back to full-array index
     peak_idx_local = np.argmin(wf[event_mask])
     peak_idx = np.where(event_mask)[0][peak_idx_local]
     peak_val = wf[peak_idx]
@@ -138,12 +135,10 @@ def extract_features(wf, t, left_base_val=None, right_base_val=None, right_t_ms=
     prominence = np.abs(peak_val - base_level)
 
     # ------------------------------------------------------------------
-    # 2. WIDTH AT HALF-MAXIMUM  (searched only within event interval)
+    # 2. WIDTH AT HALF-MAXIMUM
     # ------------------------------------------------------------------
     half_max = peak_val / 2.0
     below = wf <= half_max
-
-    # Only consider crossings within the event interval
     below_masked = below & event_mask
 
     if np.any(below_masked):
@@ -155,13 +150,13 @@ def extract_features(wf, t, left_base_val=None, right_base_val=None, right_t_ms=
         width = np.nan
 
     # ------------------------------------------------------------------
-    # 3. TIME TO PEAK  (left-base → peak; always within [0, right_t_ms])
+    # 3. TIME TO PEAK
     # ------------------------------------------------------------------
     ttp = t[peak_idx] - 0.0
     ttp = max(ttp, 0.0)
 
     # ------------------------------------------------------------------
-    # 4. RECOVERY  (peak → right-base)
+    # 4. RECOVERY
     # ------------------------------------------------------------------
     if right_t_ms is not None:
         recovery = max(right_t_ms - t[peak_idx], 0.0)
@@ -270,7 +265,6 @@ for event_file in event_files:
             t_wf = (t_wf - pre_samples) / fs * 1000
 
             # right base position in the same ms units as t_wf
-            # (right_t and left_t are in seconds; difference → ms)
             right_t_ms = (right_t - left_t) * 1000
 
             prom, width, ttp, rec = extract_features(
@@ -280,21 +274,24 @@ for event_file in event_files:
                 right_t_ms     = right_t_ms
             )
 
+            # AUC read directly from the saved event — not recomputed
+            auc = e.get("auc", np.nan)
+
             event_features[condition]["prominence"].append(prom)
             event_features[condition]["width"].append(width)
             event_features[condition]["ttp"].append(ttp)
             event_features[condition]["rec"].append(rec)
             event_features[condition]["base_dur"].append(right_t_ms)
+            event_features[condition]["auc"].append(auc)
 
             waveforms.append(wf)
-            
-            
-            
+
+
             # ── DEBUG: verify TTP + Rec == base_dur ──────────────────────────
             sum_ttp_rec = ttp + rec
             residual_debug = right_t_ms - sum_ttp_rec
 
-            if abs(residual_debug) > 0.5:   # flag anything > 0.5 ms off
+            if abs(residual_debug) > 0.5:
                 print(
                     f"[RESIDUAL DEBUG] {condition} | {rec_file}\n"
                     f"  left_t        = {left_t:.6f} s\n"
@@ -312,8 +309,7 @@ for event_file in event_files:
                     f"  residual      = {residual_debug:.4f} ms  ← should be ~0\n"
                 )
             # ── END DEBUG ─────────────────────────────────────────────────────
-            
-            
+
 
         if len(waveforms) == 0:
             continue
@@ -350,7 +346,8 @@ feature_summary = {k: [] for k in ("condition", "frequency", "frequency_sem",
                                     "prominence", "prominence_sem",
                                     "width",      "width_sem",
                                     "ttp",        "ttp_sem",
-                                    "rec",        "rec_sem")}
+                                    "rec",        "rec_sem",
+                                    "auc",        "auc_sem")}
 
 for cond in conditions:
     feature_summary["condition"].append(cond)
@@ -359,7 +356,7 @@ for cond in conditions:
     feature_summary["frequency"].append(np.nanmean(freq_vals) if freq_vals else np.nan)
     feature_summary["frequency_sem"].append(sem(freq_vals))
 
-    for key in ("prominence", "width", "ttp", "rec"):
+    for key in ("prominence", "width", "ttp", "rec", "auc"):
         vals = event_features[cond][key]
         feature_summary[key].append(np.nanmean(vals) if vals else np.nan)
         feature_summary[f"{key}_sem"].append(sem(vals))
@@ -386,7 +383,7 @@ plt.rcParams.update({
     "axes.labelsize":     9,
     "axes.titlesize":     9,
     "figure.dpi":         150,
-    "pdf.fonttype":       42,   # editable text in Illustrator
+    "pdf.fonttype":       42,
     "svg.fonttype":       "none",
 })
 
@@ -396,10 +393,10 @@ _palette = ["#1d1d1d", "#7B2CBF", "#9D4EDD", "#5A189A", "#C77DFF",
 colors = _palette[:len(conditions)]
 
 # ------------------------------------------------------------------
-# Figure layout
+# Figure layout: 6 columns (1 per-recording + 5 per-event)
 # ------------------------------------------------------------------
 n_wf_rows = len(conditions)
-fig = plt.figure(figsize=(14, 3.2 + 2.8 * n_wf_rows))
+fig = plt.figure(figsize=(16, 3.2 + 2.8 * n_wf_rows))
 
 outer = gridspec.GridSpec(
     2, 1,
@@ -408,7 +405,7 @@ outer = gridspec.GridSpec(
     figure=fig
 )
 
-top_gs    = gridspec.GridSpecFromSubplotSpec(1, 5, subplot_spec=outer[0], wspace=0.45)
+top_gs    = gridspec.GridSpecFromSubplotSpec(1, 6, subplot_spec=outer[0], wspace=0.45)
 bottom_gs = gridspec.GridSpecFromSubplotSpec(n_wf_rows, 1,
                                              subplot_spec=outer[1], hspace=0.55)
 
@@ -417,7 +414,6 @@ bottom_gs = gridspec.GridSpecFromSubplotSpec(n_wf_rows, 1,
 # Helper: draw significance brackets between bar pairs
 # ------------------------------------------------------------------
 def add_significance(ax, x1, x2, y_top, label, dy_frac=0.06):
-    """Draw a bracket + label above two bars."""
     y_range = ax.get_ylim()[1] - ax.get_ylim()[0]
     h = y_range * dy_frac
     bar_tip = y_top + h * 0.3
@@ -429,14 +425,16 @@ def add_significance(ax, x1, x2, y_top, label, dy_frac=0.06):
 
 
 # ------------------------------------------------------------------
-# Feature bar plots (row 0)
+# Feature bar plots — 6 panels
+# col 0:     frequency   (per-recording)
+# cols 1–5:  prominence, width, ttp, rec, auc   (per-event)
 # ------------------------------------------------------------------
-keys   = ["frequency",  "prominence",  "width",  "ttp",    "rec"]
-labels = ["Frequency (Hz)", "Prominence (pA)", "Half-width (ms)",
-          "Time-to-peak (ms)", "Recovery (ms)"]
+keys     = ["frequency",     "prominence",     "width",          "ttp",              "rec",          "auc"]
+labels   = ["Frequency\n(Hz)", "Prominence\n(pA)", "Half-width\n(ms)",
+            "Time-to-peak\n(ms)", "Recovery\n(ms)", "AUC\n(pA·ms)"]
 sem_keys = [k + "_sem" for k in keys]
 
-x = np.arange(len(conditions))
+x   = np.arange(len(conditions))
 rng = np.random.default_rng(0)
 
 for col_i, (key, label, sem_key) in enumerate(zip(keys, labels, sem_keys)):
@@ -446,18 +444,13 @@ for col_i, (key, label, sem_key) in enumerate(zip(keys, labels, sem_keys)):
     means = np.array(feature_summary[key],     dtype=float)
     sems  = np.array(feature_summary[sem_key], dtype=float)
 
-    # --- bars ---
-    bars = ax.bar(x, means, color=colors, alpha=0.85,
-                  width=0.55, zorder=2,
-                  linewidth=0.6, edgecolor="white")
+    ax.bar(x, means, color=colors, alpha=0.85,
+           width=0.55, zorder=2, linewidth=0.6, edgecolor="white")
 
-    # --- error bars ---
     ax.errorbar(x, means, yerr=sems,
                 fmt="none", color="black",
-                capsize=3, capthick=0.8,
-                elinewidth=0.8, zorder=3)
+                capsize=3, capthick=0.8, elinewidth=0.8, zorder=3)
 
-    # --- jittered scatter ---
     for xi, cond, color in zip(x, conditions, colors):
         if key == "frequency":
             vals = [v for v in raw_frequency.get(cond, []) if not np.isnan(v)]
@@ -469,19 +462,12 @@ for col_i, (key, label, sem_key) in enumerate(zip(keys, labels, sem_keys)):
 
         jitter = rng.normal(0, 0.07, size=len(vals))
         ax.scatter(
-            np.full(len(vals), xi) + jitter,
-            vals,
-            color="white",
-            edgecolors=color,
-            linewidths=0.6,
-            s=14,
-            alpha=0.75,
-            zorder=4
+            np.full(len(vals), xi) + jitter, vals,
+            color="white", edgecolors=color,
+            linewidths=0.6, s=14, alpha=0.75, zorder=4
         )
 
-    # --- pairwise t-tests (all pairs of conditions) ---
     if len(conditions) >= 2:
-        # Collect per-condition data arrays
         data_by_cond = []
         for cond in conditions:
             if key == "frequency":
@@ -490,13 +476,8 @@ for col_i, (key, label, sem_key) in enumerate(zip(keys, labels, sem_keys)):
                 d = [v for v in raw_event_features[cond][key] if not np.isnan(v)]
             data_by_cond.append(d)
 
-        pairs = list(combinations(range(len(conditions)), 2))
-        # Compute auto-positioned brackets
-        y_max = np.nanmax(means + sems)
-        bracket_step = (ax.get_ylim()[1] - y_max) / max(len(pairs), 1)
-        # recompute after knowing data range
-        data_max = np.nanmax([np.nanmax(d) if len(d) else 0
-                              for d in data_by_cond])
+        pairs    = list(combinations(range(len(conditions)), 2))
+        data_max = np.nanmax([np.nanmax(d) if len(d) else 0 for d in data_by_cond])
         bracket_base = data_max * 1.08
         bracket_gap  = data_max * 0.12 if data_max != 0 else 0.12
 
@@ -504,7 +485,7 @@ for col_i, (key, label, sem_key) in enumerate(zip(keys, labels, sem_keys)):
             d1, d2 = data_by_cond[i], data_by_cond[j]
             if len(d1) < 2 or len(d2) < 2:
                 continue
-            _, p = ttest_ind(d1, d2, equal_var=False)
+            _, p  = ttest_ind(d1, d2, equal_var=False)
             stars = pvalue_stars(p)
 
             y_bracket = bracket_base + pair_i * bracket_gap
@@ -525,65 +506,55 @@ for col_i, (key, label, sem_key) in enumerate(zip(keys, labels, sem_keys)):
 # ------------------------------------------------------------------
 # Section headers with underlines
 # ------------------------------------------------------------------
-
-# Grab the 5 bar-plot axes (added in order: frequency, prominence, width, ttp, rec)
-top_axes = [fig.axes[i] for i in range(5)]
+top_axes = [fig.axes[i] for i in range(6)]
 
 def ax_pos(ax):
     return ax.get_position()
 
-bb_freq  = ax_pos(top_axes[0])          # frequency (Per-Recording)
-bb_left  = ax_pos(top_axes[1])          # prominence (leftmost Per-Event)
-bb_right = ax_pos(top_axes[4])          # recovery   (rightmost Per-Event)
+bb_freq  = ax_pos(top_axes[0])   # frequency  → Per-Recording
+bb_left  = ax_pos(top_axes[1])   # prominence → leftmost Per-Event
+bb_right = ax_pos(top_axes[5])   # auc        → rightmost Per-Event
 
-header_y      = bb_freq.y1 + 0.045      # just above the bar axes
-line_y_offset = 0.005                  # gap between text bottom and line
+header_y      = bb_freq.y1 + 0.055
+line_y_offset = 0.005
+line_y        = header_y - line_y_offset
 
-# --- Per-Recording ---
-x_freq_mid = (bb_freq.x0 + bb_freq.x1) / 2
-fig.text(x_freq_mid, header_y, "Per-Recording",
+# Per-Recording
+fig.text((bb_freq.x0 + bb_freq.x1) / 2, header_y, "Per-Recording",
          ha="center", va="bottom", fontsize=10, fontweight="bold",
          transform=fig.transFigure, color="#111111")
-
-line_y = header_y - line_y_offset
 fig.add_artist(Line2D(
     [bb_freq.x0, bb_freq.x1], [line_y, line_y],
     transform=fig.transFigure, color="black", linewidth=1.2, clip_on=False
 ))
 
-# --- Per-Event ---
-x_event_mid = (bb_left.x0 + bb_right.x1) / 2
-fig.text(x_event_mid, header_y, "Per-Event",
+# Per-Event
+fig.text((bb_left.x0 + bb_right.x1) / 2, header_y, "Per-Event",
          ha="center", va="bottom", fontsize=10, fontweight="bold",
          transform=fig.transFigure, color="#111111")
-
 fig.add_artist(Line2D(
     [bb_left.x0, bb_right.x1], [line_y, line_y],
     transform=fig.transFigure, color="black", linewidth=1.2, clip_on=False
 ))
-# ------------------------------------------------------------------
-# Waveform plots (rows 1…N)
-# ------------------------------------------------------------------
-# Recompute a shared time axis for labelling (uses last fs from loop above)
-# (pre_samples / fs are still in scope from the data-loading loop)
 
+# ------------------------------------------------------------------
+# Waveform plots
+# ------------------------------------------------------------------
 for row_idx, cond in enumerate(conditions):
 
     ax = fig.add_subplot(bottom_gs[row_idx])
 
-    wfs = np.array(condition_waveforms[cond])
+    wfs      = np.array(condition_waveforms[cond])
     n_events = len(wfs)
 
-    t = (np.arange(wfs.shape[1]) - pre_samples) / fs * 1000
-
+    t     = (np.arange(wfs.shape[1]) - pre_samples) / fs * 1000
     color = colors[row_idx]
 
-    # individual traces
     for wf in wfs:
-        ax.plot(t, wf, color=color, alpha=max(0.03, min(0.12, 3 / n_events)),
+        ax.plot(t, wf, color=color,
+                alpha=max(0.03, min(0.12, 3 / n_events)),
                 lw=0.6, rasterized=True)
 
-    # mean ± SEM
     mean_wf = np.mean(wfs, axis=0)
     sem_wf  = np.std(wfs, axis=0) / np.sqrt(n_events)
 
@@ -591,7 +562,6 @@ for row_idx, cond in enumerate(conditions):
                     color=color, alpha=0.18, zorder=2)
     ax.plot(t, mean_wf, color=color, lw=2.2, zorder=3)
 
-    # left-base marker
     ax.axvline(0, color="k", ls="--", lw=0.8, alpha=0.5)
 
     ax.set_title(
@@ -612,21 +582,11 @@ for row_idx, cond in enumerate(conditions):
 # Save / show
 # ------------------------------------------------------------------
 fig.patch.set_facecolor("white")
-
 plt.show()
 print("Done.")
 
 # =============================================================================
 # CONFIRMATION FIGURE
-# Verifies that TTP + Recovery ≈ base-to-base duration for every event.
-#
-# For each condition, three values are plotted side-by-side per event:
-#   • TTP + Rec   (sum of the two annotated segments)
-#   • base_dur    (right_t − left_t, computed independently from timestamps)
-#   • residual    (base_dur − (TTP + Rec); should be ≈ 0)
-#
-# If the arithmetic is correct, the first two columns will be identical
-# and the third will scatter tightly around zero.
 # =============================================================================
 
 fig2, axes2 = plt.subplots(
@@ -644,20 +604,18 @@ for ax, cond, color in zip(axes2, conditions, colors):
     rec_vals  = np.array(raw_event_features[cond]["rec"],      dtype=float)
     base_vals = np.array(raw_event_features[cond]["base_dur"], dtype=float)
 
-    # drop events where any value is NaN
-    valid = ~(np.isnan(ttp_vals) | np.isnan(rec_vals) | np.isnan(base_vals))
+    valid  = ~(np.isnan(ttp_vals) | np.isnan(rec_vals) | np.isnan(base_vals))
     ttp_v  = ttp_vals[valid]
     rec_v  = rec_vals[valid]
     base_v = base_vals[valid]
 
     summed   = ttp_v + rec_v
-    residual = base_v - summed          # should be ≈ 0 everywhere
+    residual = base_v - summed
 
     x_pos  = np.array([0, 1, 2])
     x_labs = ["TTP + Rec", "Base dur.", "Residual\n(base \u2212 sum)"]
-    data   = [summed, base_v, residual]
 
-    for xi, vals_i in zip(x_pos[:2], data[:2]):
+    for xi, vals_i in zip(x_pos[:2], [summed, base_v]):
         m = np.nanmean(vals_i)
         s = np.nanstd(vals_i, ddof=1) / np.sqrt(len(vals_i))
         ax.bar(xi, m, color=color, alpha=0.8, width=0.55,
@@ -669,7 +627,6 @@ for ax, cond, color in zip(axes2, conditions, colors):
                    color="white", edgecolors=color, linewidths=0.6,
                    s=14, alpha=0.75, zorder=4)
 
-    # residual: zero-centred, show as scatter + mean line
     jitter = np.random.default_rng(99).normal(0, 0.06, size=len(residual))
     ax.scatter(np.full(len(residual), 2) + jitter, residual,
                color=color, s=14, alpha=0.6, linewidths=0, zorder=4)
@@ -687,7 +644,6 @@ for ax, cond, color in zip(axes2, conditions, colors):
     ax.spines["right"].set_visible(False)
     ax.tick_params(length=3)
 
-    # annotate mean residual
     ylo, yhi = ax.get_ylim()
     ax.text(2, ylo + (yhi - ylo) * 0.05,
             f"mean = {np.nanmean(residual):.3f} ms",
@@ -697,8 +653,4 @@ fig2.suptitle("Confirmation: TTP + Recovery vs. Base-to-Base Duration",
               fontsize=10, fontweight="bold", y=1.01)
 fig2.patch.set_facecolor("white")
 plt.tight_layout()
-plt.savefig(os.path.join(_script_dir, "mPSC_confirmation.pdf"),
-            bbox_inches="tight", dpi=300)
-plt.savefig(os.path.join(_script_dir, "mPSC_confirmation.png"),
-            bbox_inches="tight", dpi=300)
 plt.show()
