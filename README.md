@@ -20,7 +20,7 @@ The script generates 2 figures. The first figure shows the comparison features b
 
 <img width="1845" height="950" alt="Screenshot 2026-06-02 at 12 04 06" src="https://github.com/user-attachments/assets/ba801603-38e0-470e-ac33-5862c1e88196" />
 
-The second is a validation figure, which shows the sum of the onset and offset times for each condition (time to peak and time to recover). It compares this value to the difference in base values, and plots the residual (which should be 0). 
+The second is a validation figure, which shows the sum of the onset and offset times for each condition (time to peak and time to recover). It compares this value to the difference in base values (on the x-axis), and plots the residual (which should be 0). 
 
 <img width="1034" height="538" alt="Screenshot 2026-06-02 at 12 04 53" src="https://github.com/user-attachments/assets/dd1af2a4-78b7-4224-bf7f-f477c36647cf" />
 
