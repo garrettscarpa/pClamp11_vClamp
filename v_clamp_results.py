@@ -18,7 +18,7 @@ from itertools import combinations
 # ROOT DIRECTORY
 # =============================================================================
 
-root = '/Volumes/BWH-HVDATA/Individual Folders/Garrett Scarpa/PatchClamp/Analyses/RD_SCLC_TumorCells_CoCulture'
+root = '/Volumes/BWH-HVDATA/Individual Folders/Garrett Scarpa/Ephys/Patch and LFP/Analyses/Patch/RD_SCLC_TumorCells_MonoCultur_May27_2026_Update'
 
 
 # =============================================================================
@@ -47,11 +47,12 @@ total_window_ms = 250
 highpass_cutoff = 1
 lowpass_cutoff = 1000
 
-accepted_only = True
+halfwidth_threshold_ms = 3.0   # events with width <= threshold → "narrow", else "wide"
 
 ylim = (-40, 15)
 
-
+accepted_only = True
+split_by_halfwidth = False
 # =============================================================================
 # FILTERS
 # =============================================================================
@@ -274,18 +275,27 @@ for event_file in event_files:
                 right_t_ms     = right_t_ms
             )
 
-            # AUC read directly from the saved event — not recomputed
             auc = e.get("auc", np.nan)
+            if auc is None:
+                auc = np.nan
 
-            event_features[condition]["prominence"].append(prom)
-            event_features[condition]["width"].append(width)
-            event_features[condition]["ttp"].append(ttp)
-            event_features[condition]["rec"].append(rec)
-            event_features[condition]["base_dur"].append(right_t_ms)
-            event_features[condition]["auc"].append(auc)
+            # ── Assign condition label by half-width population ──
+            if split_by_halfwidth:
+                if np.isnan(width):
+                    continue          # skip events that can't be classified
+                pop = "narrow" if width <= halfwidth_threshold_ms else "wide"
+                cond_label = f"{condition}_{pop}"
+            else:
+                cond_label = condition
 
-            waveforms.append(wf)
+            event_features[cond_label]["prominence"].append(prom)
+            event_features[cond_label]["width"].append(width)
+            event_features[cond_label]["ttp"].append(ttp)
+            event_features[cond_label]["rec"].append(rec)
+            event_features[cond_label]["base_dur"].append(right_t_ms)
+            event_features[cond_label]["auc"].append(auc)
 
+            waveforms.append((cond_label, wf))
 
             # ── DEBUG: verify TTP + Rec == base_dur ──────────────────────────
             sum_ttp_rec = ttp + rec
@@ -314,16 +324,20 @@ for event_file in event_files:
         if len(waveforms) == 0:
             continue
 
-        waveforms = np.array(waveforms)
+        # Group this recording's waveforms by population label
+        wf_by_label = defaultdict(list)
+        for lbl, wf in waveforms:
+            wf_by_label[lbl].append(wf)
 
         duration_s = analysis_end_s - analysis_start_s
-        recording_features.append({
-            "condition": condition,
-            "frequency": len(waveforms) / duration_s
-        })
 
-        condition_waveforms[condition].extend(waveforms)
-        condition_recordings[condition].add((rec_path, rec_file))
+        for lbl, wf_list in wf_by_label.items():
+            recording_features.append({
+                "condition": lbl,
+                "frequency": len(wf_list) / duration_s
+            })
+            condition_waveforms[lbl].extend(wf_list)
+            condition_recordings[lbl].add((rec_path, rec_file))
 
 
 # =============================================================================
@@ -357,7 +371,7 @@ for cond in conditions:
     feature_summary["frequency_sem"].append(sem(freq_vals))
 
     for key in ("prominence", "width", "ttp", "rec", "auc"):
-        vals = event_features[cond][key]
+        vals = [v for v in event_features[cond][key] if v is not None]
         feature_summary[key].append(np.nanmean(vals) if vals else np.nan)
         feature_summary[f"{key}_sem"].append(sem(vals))
 
@@ -387,270 +401,307 @@ plt.rcParams.update({
     "svg.fonttype":       "none",
 })
 
-# Color palette – one distinct color per condition
 _palette = ["#1d1d1d", "#7B2CBF", "#9D4EDD", "#5A189A", "#C77DFF",
             "#2196F3", "#FF5722", "#00897B"]
-colors = _palette[:len(conditions)]
-
-# ------------------------------------------------------------------
-# Figure layout: 6 columns (1 per-recording + 5 per-event)
-# ------------------------------------------------------------------
-n_wf_rows = len(conditions)
-fig = plt.figure(figsize=(16, 3.2 + 2.8 * n_wf_rows))
-
-outer = gridspec.GridSpec(
-    2, 1,
-    height_ratios=[2.8, 2.8 * n_wf_rows],
-    hspace=0.55,
-    figure=fig
-)
-
-top_gs    = gridspec.GridSpecFromSubplotSpec(1, 6, subplot_spec=outer[0], wspace=0.45)
-bottom_gs = gridspec.GridSpecFromSubplotSpec(n_wf_rows, 1,
-                                             subplot_spec=outer[1], hspace=0.55)
 
 
-# ------------------------------------------------------------------
-# Helper: draw significance brackets between bar pairs
-# ------------------------------------------------------------------
-def add_significance(ax, x1, x2, y_top, label, dy_frac=0.06):
-    y_range = ax.get_ylim()[1] - ax.get_ylim()[0]
-    h = y_range * dy_frac
-    bar_tip = y_top + h * 0.3
-    ax.plot([x1, x1, x2, x2],
-            [bar_tip, bar_tip + h, bar_tip + h, bar_tip],
-            lw=0.8, color="k")
-    ax.text((x1 + x2) / 2, bar_tip + h * 1.1, label,
-            ha="center", va="bottom", fontsize=7)
+# =============================================================================
+# MAIN PLOTTING FUNCTION  (one full figure set per condition group)
+# =============================================================================
 
+def make_figures(group_conditions, group_name=""):
+    """
+    Build the feature/waveform figure and the confirmation figure for a
+    given subset of conditions.
+    """
 
-# ------------------------------------------------------------------
-# Feature bar plots — 6 panels
-# col 0:     frequency   (per-recording)
-# cols 1–5:  prominence, width, ttp, rec, auc   (per-event)
-# ------------------------------------------------------------------
-keys     = ["frequency",     "prominence",     "width",          "ttp",              "rec",          "auc"]
-labels   = ["Frequency\n(Hz)", "Prominence\n(pA)", "Half-width\n(ms)",
-            "Time-to-peak\n(ms)", "Recovery\n(ms)", "AUC\n(pA·ms)"]
-sem_keys = [k + "_sem" for k in keys]
+    if len(group_conditions) == 0:
+        return
 
-x   = np.arange(len(conditions))
-rng = np.random.default_rng(0)
+    colors = _palette[:len(group_conditions)]
 
-for col_i, (key, label, sem_key) in enumerate(zip(keys, labels, sem_keys)):
+    # ------------------------------------------------------------------
+    # Figure layout: 6 columns (1 per-recording + 5 per-event)
+    # ------------------------------------------------------------------
+    n_wf_rows = len(group_conditions)
+    fig = plt.figure(figsize=(16, 3.2 + 2.8 * n_wf_rows))
 
-    ax = fig.add_subplot(top_gs[col_i])
+    if group_name:
+        fig.suptitle(group_name, fontsize=13, fontweight="bold", y=0.995)
 
-    means = np.array(feature_summary[key],     dtype=float)
-    sems  = np.array(feature_summary[sem_key], dtype=float)
+    outer = gridspec.GridSpec(
+        2, 1,
+        height_ratios=[2.8, 2.8 * n_wf_rows],
+        hspace=0.55,
+        figure=fig
+    )
 
-    ax.bar(x, means, color=colors, alpha=0.85,
-           width=0.55, zorder=2, linewidth=0.6, edgecolor="white")
+    top_gs    = gridspec.GridSpecFromSubplotSpec(1, 6, subplot_spec=outer[0], wspace=0.45)
+    bottom_gs = gridspec.GridSpecFromSubplotSpec(n_wf_rows, 1,
+                                                 subplot_spec=outer[1], hspace=0.55)
 
-    ax.errorbar(x, means, yerr=sems,
-                fmt="none", color="black",
-                capsize=3, capthick=0.8, elinewidth=0.8, zorder=3)
+    # ------------------------------------------------------------------
+    # Feature bar plots — 6 panels
+    # col 0:     frequency   (per-recording)
+    # cols 1–5:  prominence, width, ttp, rec, auc   (per-event)
+    # ------------------------------------------------------------------
+    keys     = ["frequency",     "prominence",     "width",          "ttp",              "rec",          "auc"]
+    labels   = ["Frequency\n(Hz)", "Prominence\n(pA)", "Half-width\n(ms)",
+                "Time-to-peak\n(ms)", "Recovery\n(ms)", "AUC\n(pA·ms)"]
 
-    for xi, cond, color in zip(x, conditions, colors):
-        if key == "frequency":
-            vals = [v for v in raw_frequency.get(cond, []) if not np.isnan(v)]
-        else:
-            vals = [v for v in raw_event_features[cond][key] if not np.isnan(v)]
+    x   = np.arange(len(group_conditions))
+    rng = np.random.default_rng(0)
 
-        if len(vals) == 0:
+    for col_i, (key, label) in enumerate(zip(keys, labels)):
+
+        ax = fig.add_subplot(top_gs[col_i])
+
+        means = np.array([feature_lookup[cond][key]            for cond in group_conditions], dtype=float)
+        sems  = np.array([feature_lookup[cond][f"{key}_sem"]   for cond in group_conditions], dtype=float)
+
+        ax.bar(x, means, color=colors, alpha=0.85,
+               width=0.55, zorder=2, linewidth=0.6, edgecolor="white")
+
+        ax.errorbar(x, means, yerr=sems,
+                    fmt="none", color="black",
+                    capsize=3, capthick=0.8, elinewidth=0.8, zorder=3)
+
+        for xi, cond, color in zip(x, group_conditions, colors):
+            if key == "frequency":
+                vals = [v for v in raw_frequency.get(cond, []) if not np.isnan(v)]
+            else:
+                vals = [v for v in raw_event_features[cond][key]
+                        if v is not None and not np.isnan(v)]
+
+            if len(vals) == 0:
+                continue
+
+            jitter = rng.normal(0, 0.07, size=len(vals))
+            ax.scatter(
+                np.full(len(vals), xi) + jitter, vals,
+                color="white", edgecolors=color,
+                linewidths=0.6, s=14, alpha=0.75, zorder=4
+            )
+
+        if len(group_conditions) >= 2:
+            data_by_cond = []
+            for cond in group_conditions:
+                if key == "frequency":
+                    d = [v for v in raw_frequency.get(cond, []) if not np.isnan(v)]
+                else:
+                    d = [v for v in raw_event_features[cond][key]
+                         if v is not None and not np.isnan(v)]
+                data_by_cond.append(d)
+
+            pairs    = list(combinations(range(len(group_conditions)), 2))
+            data_max = np.nanmax([np.nanmax(d) if len(d) else 0 for d in data_by_cond])
+            bracket_base = data_max * 1.08
+            bracket_gap  = data_max * 0.12 if data_max != 0 else 0.12
+
+            for pair_i, (i, j) in enumerate(pairs):
+                d1, d2 = data_by_cond[i], data_by_cond[j]
+                if len(d1) < 2 or len(d2) < 2:
+                    continue
+                _, p  = ttest_ind(d1, d2, equal_var=False)
+                stars = pvalue_stars(p)
+
+                y_bracket = bracket_base + pair_i * bracket_gap
+                h = bracket_gap * 0.35
+                ax.plot([i, i, j, j],
+                        [y_bracket, y_bracket + h, y_bracket + h, y_bracket],
+                        lw=0.7, color="#444444")
+                ax.text((i + j) / 2, y_bracket + h * 1.1, stars,
+                        ha="center", va="bottom", fontsize=6.5, color="#222222")
+
+        ax.set_title(label, fontsize=8.5, fontweight="bold", pad=4)
+        ax.set_xticks(x)
+        ax.set_xticklabels(group_conditions, rotation=35, ha="right", fontsize=7.5)
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=4, prune="upper"))
+        ax.tick_params(length=3)
+        ax.set_ylabel("")
+
+    # ------------------------------------------------------------------
+    # Section headers with underlines
+    # ------------------------------------------------------------------
+    top_axes = fig.axes[:6]
+
+    bb_freq  = top_axes[0].get_position()   # frequency  → Per-Recording
+    bb_left  = top_axes[1].get_position()   # prominence → leftmost Per-Event
+    bb_right = top_axes[5].get_position()   # auc        → rightmost Per-Event
+
+    header_y = bb_freq.y1 + 0.055
+    line_y   = header_y - 0.005
+
+    fig.text((bb_freq.x0 + bb_freq.x1) / 2, header_y, "Per-Recording",
+             ha="center", va="bottom", fontsize=10, fontweight="bold",
+             transform=fig.transFigure, color="#111111")
+    fig.add_artist(Line2D(
+        [bb_freq.x0, bb_freq.x1], [line_y, line_y],
+        transform=fig.transFigure, color="black", linewidth=1.2, clip_on=False
+    ))
+
+    fig.text((bb_left.x0 + bb_right.x1) / 2, header_y, "Per-Event",
+             ha="center", va="bottom", fontsize=10, fontweight="bold",
+             transform=fig.transFigure, color="#111111")
+    fig.add_artist(Line2D(
+        [bb_left.x0, bb_right.x1], [line_y, line_y],
+        transform=fig.transFigure, color="black", linewidth=1.2, clip_on=False
+    ))
+
+    # ------------------------------------------------------------------
+    # Waveform plots
+    # ------------------------------------------------------------------
+    for row_idx, cond in enumerate(group_conditions):
+
+        ax = fig.add_subplot(bottom_gs[row_idx])
+
+        wfs      = np.array(condition_waveforms[cond])
+        n_events = len(wfs)
+
+        if n_events == 0:
+            ax.set_title(f"{cond}   (no events)", fontsize=8.5,
+                         fontweight="bold", color="#222222", pad=4)
+            ax.set_ylim(ylim)
             continue
 
-        jitter = rng.normal(0, 0.07, size=len(vals))
-        ax.scatter(
-            np.full(len(vals), xi) + jitter, vals,
-            color="white", edgecolors=color,
-            linewidths=0.6, s=14, alpha=0.75, zorder=4
+        t     = (np.arange(wfs.shape[1]) - pre_samples) / fs * 1000
+        color = colors[row_idx]
+
+        for wf in wfs:
+            ax.plot(t, wf, color=color,
+                    alpha=max(0.03, min(0.12, 3 / n_events)),
+                    lw=0.6, rasterized=True)
+
+        mean_wf = np.mean(wfs, axis=0)
+        sem_wf  = np.std(wfs, axis=0) / np.sqrt(n_events)
+
+        ax.fill_between(t, mean_wf - sem_wf, mean_wf + sem_wf,
+                        color=color, alpha=0.18, zorder=2)
+        ax.plot(t, mean_wf, color=color, lw=2.2, zorder=3)
+
+        ax.axvline(0, color="k", ls="--", lw=0.8, alpha=0.5)
+
+        ax.set_title(
+            f"{cond}   (n = {n_events} events,  N = {condition_N[cond]} recordings)",
+            fontsize=8.5, fontweight="bold", color="#222222", pad=4
         )
+        ax.set_ylim(ylim)
+        ax.set_ylabel("Current (pA)", fontsize=8.5)
 
-    if len(conditions) >= 2:
-        data_by_cond = []
-        for cond in conditions:
-            if key == "frequency":
-                d = [v for v in raw_frequency.get(cond, []) if not np.isnan(v)]
-            else:
-                d = [v for v in raw_event_features[cond][key] if not np.isnan(v)]
-            data_by_cond.append(d)
+        if row_idx < n_wf_rows - 1:
+            ax.set_xticklabels([])
+        else:
+            ax.set_xlabel("Time from left base (ms)", fontsize=8.5)
 
-        pairs    = list(combinations(range(len(conditions)), 2))
-        data_max = np.nanmax([np.nanmax(d) if len(d) else 0 for d in data_by_cond])
-        bracket_base = data_max * 1.08
-        bracket_gap  = data_max * 0.12 if data_max != 0 else 0.12
+        ax.tick_params(length=3)
 
-        for pair_i, (i, j) in enumerate(pairs):
-            d1, d2 = data_by_cond[i], data_by_cond[j]
-            if len(d1) < 2 or len(d2) < 2:
-                continue
-            _, p  = ttest_ind(d1, d2, equal_var=False)
-            stars = pvalue_stars(p)
+    fig.patch.set_facecolor("white")
+    plt.show()
 
-            y_bracket = bracket_base + pair_i * bracket_gap
-            h = bracket_gap * 0.35
-            ax.plot([i, i, j, j],
-                    [y_bracket, y_bracket + h, y_bracket + h, y_bracket],
-                    lw=0.7, color="#444444")
-            ax.text((i + j) / 2, y_bracket + h * 1.1, stars,
-                    ha="center", va="bottom", fontsize=6.5, color="#222222")
-
-    ax.set_title(label, fontsize=8.5, fontweight="bold", pad=4)
-    ax.set_xticks(x)
-    ax.set_xticklabels(conditions, rotation=35, ha="right", fontsize=7.5)
-    ax.yaxis.set_major_locator(MaxNLocator(nbins=4, prune="upper"))
-    ax.tick_params(length=3)
-    ax.set_ylabel("")
-
-# ------------------------------------------------------------------
-# Section headers with underlines
-# ------------------------------------------------------------------
-top_axes = [fig.axes[i] for i in range(6)]
-
-def ax_pos(ax):
-    return ax.get_position()
-
-bb_freq  = ax_pos(top_axes[0])   # frequency  → Per-Recording
-bb_left  = ax_pos(top_axes[1])   # prominence → leftmost Per-Event
-bb_right = ax_pos(top_axes[5])   # auc        → rightmost Per-Event
-
-header_y      = bb_freq.y1 + 0.055
-line_y_offset = 0.005
-line_y        = header_y - line_y_offset
-
-# Per-Recording
-fig.text((bb_freq.x0 + bb_freq.x1) / 2, header_y, "Per-Recording",
-         ha="center", va="bottom", fontsize=10, fontweight="bold",
-         transform=fig.transFigure, color="#111111")
-fig.add_artist(Line2D(
-    [bb_freq.x0, bb_freq.x1], [line_y, line_y],
-    transform=fig.transFigure, color="black", linewidth=1.2, clip_on=False
-))
-
-# Per-Event
-fig.text((bb_left.x0 + bb_right.x1) / 2, header_y, "Per-Event",
-         ha="center", va="bottom", fontsize=10, fontweight="bold",
-         transform=fig.transFigure, color="#111111")
-fig.add_artist(Line2D(
-    [bb_left.x0, bb_right.x1], [line_y, line_y],
-    transform=fig.transFigure, color="black", linewidth=1.2, clip_on=False
-))
-
-# ------------------------------------------------------------------
-# Waveform plots
-# ------------------------------------------------------------------
-for row_idx, cond in enumerate(conditions):
-
-    ax = fig.add_subplot(bottom_gs[row_idx])
-
-    wfs      = np.array(condition_waveforms[cond])
-    n_events = len(wfs)
-
-    t     = (np.arange(wfs.shape[1]) - pre_samples) / fs * 1000
-    color = colors[row_idx]
-
-    for wf in wfs:
-        ax.plot(t, wf, color=color,
-                alpha=max(0.03, min(0.12, 3 / n_events)),
-                lw=0.6, rasterized=True)
-
-    mean_wf = np.mean(wfs, axis=0)
-    sem_wf  = np.std(wfs, axis=0) / np.sqrt(n_events)
-
-    ax.fill_between(t, mean_wf - sem_wf, mean_wf + sem_wf,
-                    color=color, alpha=0.18, zorder=2)
-    ax.plot(t, mean_wf, color=color, lw=2.2, zorder=3)
-
-    ax.axvline(0, color="k", ls="--", lw=0.8, alpha=0.5)
-
-    ax.set_title(
-        f"{cond}   (n = {n_events} events,  N = {condition_N[cond]} recordings)",
-        fontsize=8.5, fontweight="bold", color="#222222", pad=4
+    # ------------------------------------------------------------------
+    # CONFIRMATION FIGURE
+    # ------------------------------------------------------------------
+    fig2, axes2 = plt.subplots(
+        1, len(group_conditions),
+        figsize=(3.5 * len(group_conditions), 4),
+        sharey=False
     )
-    ax.set_ylim(ylim)
-    ax.set_ylabel("Current (pA)", fontsize=8.5)
 
-    if row_idx < n_wf_rows - 1:
-        ax.set_xticklabels([])
-    else:
-        ax.set_xlabel("Time from left base (ms)", fontsize=8.5)
+    if len(group_conditions) == 1:
+        axes2 = [axes2]
 
-    ax.tick_params(length=3)
+    for ax, cond, color in zip(axes2, group_conditions, colors):
 
-# ------------------------------------------------------------------
-# Save / show
-# ------------------------------------------------------------------
-fig.patch.set_facecolor("white")
-plt.show()
+        ttp_vals  = np.array(raw_event_features[cond]["ttp"],      dtype=float)
+        rec_vals  = np.array(raw_event_features[cond]["rec"],      dtype=float)
+        base_vals = np.array(raw_event_features[cond]["base_dur"], dtype=float)
+
+        valid  = ~(np.isnan(ttp_vals) | np.isnan(rec_vals) | np.isnan(base_vals))
+        ttp_v  = ttp_vals[valid]
+        rec_v  = rec_vals[valid]
+        base_v = base_vals[valid]
+
+        if len(base_v) == 0:
+            ax.set_title(f"{cond} (no events)", fontsize=9, fontweight="bold")
+            continue
+
+        summed   = ttp_v + rec_v
+        residual = base_v - summed
+
+        x_pos  = np.array([0, 1, 2])
+        x_labs = ["Onset + Offsert", "Base dur.", "Residual\n(base \u2212 sum)"]
+
+        for xi, vals_i in zip(x_pos[:2], [summed, base_v]):
+            m = np.nanmean(vals_i)
+            s = np.nanstd(vals_i, ddof=1) / np.sqrt(len(vals_i))
+            ax.bar(xi, m, color=color, alpha=0.8, width=0.55,
+                   edgecolor="white", linewidth=0.6, zorder=2)
+            ax.errorbar(xi, m, yerr=s, fmt="none", color="black",
+                        capsize=3, capthick=0.8, elinewidth=0.8, zorder=3)
+            jitter = np.random.default_rng(xi).normal(0, 0.06, size=len(vals_i))
+            ax.scatter(np.full(len(vals_i), xi) + jitter, vals_i,
+                       color="white", edgecolors=color, linewidths=0.6,
+                       s=14, alpha=0.75, zorder=4)
+
+        jitter = np.random.default_rng(99).normal(0, 0.06, size=len(residual))
+        ax.scatter(np.full(len(residual), 2) + jitter, residual,
+                   color=color, s=14, alpha=0.6, linewidths=0, zorder=4)
+        ax.axhline(np.nanmean(residual), color="black", lw=1.2,
+                   xmin=2/3 + 0.02, xmax=1.0 - 0.02, zorder=5)
+        ax.axhline(0, color="red", lw=0.8, ls="--", alpha=0.6, zorder=3,
+                   xmin=2/3, xmax=1.0)
+
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(x_labs, fontsize=8)
+        ax.set_xlim(-0.6, 2.6)
+        ax.set_title(cond, fontsize=9, fontweight="bold", pad=4)
+        ax.set_ylabel("Time (ms)", fontsize=8.5)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.tick_params(length=3)
+
+        ylo, yhi = ax.get_ylim()
+        ax.text(2, ylo + (yhi - ylo) * 0.05,
+                f"mean = {np.nanmean(residual):.3f} ms",
+                ha="center", va="bottom", fontsize=7, color="#444444")
+
+    title_suffix = f"  —  {group_name}" if group_name else ""
+    fig2.suptitle("Confirmation: TTP + Recovery vs. Base-to-Base Duration" + title_suffix,
+                  fontsize=10, fontweight="bold", y=1.01)
+    fig2.patch.set_facecolor("white")
+    plt.tight_layout()
+    plt.show()
+
+
+# =============================================================================
+# BUILD A LOOKUP FROM THE SUMMARY  (so make_figures can index by condition)
+# =============================================================================
+
+feature_lookup = {}
+for i, cond in enumerate(feature_summary["condition"]):
+    feature_lookup[cond] = {
+        k: feature_summary[k][i]
+        for k in feature_summary if k != "condition"
+    }
+
+
+# =============================================================================
+# SPLIT CONDITIONS INTO GROUPS AND PLOT SEPARATELY
+# =============================================================================
+
+if split_by_halfwidth:
+    narrow_conditions = sorted(c for c in conditions if c.endswith("_narrow"))
+    wide_conditions   = sorted(c for c in conditions if c.endswith("_wide"))
+    other_conditions  = sorted(c for c in conditions
+                               if not (c.endswith("_narrow") or c.endswith("_wide")))
+
+    make_figures(narrow_conditions, group_name="Narrow events")
+    make_figures(wide_conditions,   group_name="Wide events")
+
+    # Any conditions that never got split (e.g. NaN-width fallbacks)
+    if other_conditions:
+        make_figures(other_conditions, group_name="Unsplit events")
+else:
+    make_figures(conditions)
+
 print("Done.")
-
-# =============================================================================
-# CONFIRMATION FIGURE
-# =============================================================================
-
-fig2, axes2 = plt.subplots(
-    1, len(conditions),
-    figsize=(3.5 * len(conditions), 4),
-    sharey=False
-)
-
-if len(conditions) == 1:
-    axes2 = [axes2]
-
-for ax, cond, color in zip(axes2, conditions, colors):
-
-    ttp_vals  = np.array(raw_event_features[cond]["ttp"],      dtype=float)
-    rec_vals  = np.array(raw_event_features[cond]["rec"],      dtype=float)
-    base_vals = np.array(raw_event_features[cond]["base_dur"], dtype=float)
-
-    valid  = ~(np.isnan(ttp_vals) | np.isnan(rec_vals) | np.isnan(base_vals))
-    ttp_v  = ttp_vals[valid]
-    rec_v  = rec_vals[valid]
-    base_v = base_vals[valid]
-
-    summed   = ttp_v + rec_v
-    residual = base_v - summed
-
-    x_pos  = np.array([0, 1, 2])
-    x_labs = ["TTP + Rec", "Base dur.", "Residual\n(base \u2212 sum)"]
-
-    for xi, vals_i in zip(x_pos[:2], [summed, base_v]):
-        m = np.nanmean(vals_i)
-        s = np.nanstd(vals_i, ddof=1) / np.sqrt(len(vals_i))
-        ax.bar(xi, m, color=color, alpha=0.8, width=0.55,
-               edgecolor="white", linewidth=0.6, zorder=2)
-        ax.errorbar(xi, m, yerr=s, fmt="none", color="black",
-                    capsize=3, capthick=0.8, elinewidth=0.8, zorder=3)
-        jitter = np.random.default_rng(xi).normal(0, 0.06, size=len(vals_i))
-        ax.scatter(np.full(len(vals_i), xi) + jitter, vals_i,
-                   color="white", edgecolors=color, linewidths=0.6,
-                   s=14, alpha=0.75, zorder=4)
-
-    jitter = np.random.default_rng(99).normal(0, 0.06, size=len(residual))
-    ax.scatter(np.full(len(residual), 2) + jitter, residual,
-               color=color, s=14, alpha=0.6, linewidths=0, zorder=4)
-    ax.axhline(np.nanmean(residual), color="black", lw=1.2,
-               xmin=2/3 + 0.02, xmax=1.0 - 0.02, zorder=5)
-    ax.axhline(0, color="red", lw=0.8, ls="--", alpha=0.6, zorder=3,
-               xmin=2/3, xmax=1.0)
-
-    ax.set_xticks(x_pos)
-    ax.set_xticklabels(x_labs, fontsize=8)
-    ax.set_xlim(-0.6, 2.6)
-    ax.set_title(cond, fontsize=9, fontweight="bold", pad=4)
-    ax.set_ylabel("Time (ms)", fontsize=8.5)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.tick_params(length=3)
-
-    ylo, yhi = ax.get_ylim()
-    ax.text(2, ylo + (yhi - ylo) * 0.05,
-            f"mean = {np.nanmean(residual):.3f} ms",
-            ha="center", va="bottom", fontsize=7, color="#444444")
-
-fig2.suptitle("Confirmation: TTP + Recovery vs. Base-to-Base Duration",
-              fontsize=10, fontweight="bold", y=1.01)
-fig2.patch.set_facecolor("white")
-plt.tight_layout()
-plt.show()

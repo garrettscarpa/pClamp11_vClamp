@@ -5,8 +5,8 @@ import numpy as np
 from scipy.signal import butter, filtfilt
 
 ############################## Load the ABF file ##############################
-root = '/Volumes/BWH-HVDATA/Individual Folders/Garrett Scarpa/PatchClamp/Data'
-recording = '2026_04_24_0057'
+root = '/Volumes/BWH-HVDATA/Individual Folders/Garrett Scarpa/Ephys/Patch and LFP/Analyses/Patch/RD_SCLC_TumorCells_MonoCulture/Control'
+recording = '2026_04_22_0015'
 
 abf = pyabf.ABF(os.path.join(root, recording + ".abf"))
 
